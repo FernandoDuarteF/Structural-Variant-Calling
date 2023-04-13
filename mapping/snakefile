@@ -1,0 +1,97 @@
+conditions = glob_wildcards("../sequences/{condition}_R1.fq.gz").condition
+
+base_path = (os.path.abspath(".."))
+
+
+rule all:
+    input:
+        base_path + "/ref_seq/hg19_chr8",
+        expand("mapping/bam_files/{cond}_no_RG.bam", cond = conditions),
+        expand("mapping/bam_files/{cond}_RG.bam", cond = conditions),
+        expand("mapping/bam_files/{cond}_final.bam", cond = conditions),
+        expand("mapping/bam_files/{cond}_fixmate.bam", cond = conditions),
+        expand("mapping/bam_files/{cond}_sorted.bam", cond = conditions),
+        expand("mapping/bam_files/{cond}_collate", cond = conditions),
+        expand("stats/final/samtools/{cond}_stats.txt", cond = conditions),
+        "stats/final/multiqc",
+        #"calling/SV.vcf.gz"
+
+rule index:
+    input:
+        base_path + "/ref_seq/hg19_chr8.fa.gz"
+    output:
+        touch(base_path + "/ref_seq/hg19_chr8")
+    conda:
+        base_path + "/conda/bwa.yaml"
+    shell:
+        """
+        bwa index -a bwtsw {input}
+        """
+
+rule bwa:
+    input:
+        F = base_path + "/sequences/{cond}_R1.fq.gz",
+        R = base_path + "/sequences/{cond}_R2.fq.gz",
+        index = base_path + "/ref_seq/hg19_chr8.fa.gz"
+    output:
+        bam = "mapping/bam_files/{cond}_no_RG.bam",
+        bam_RG = "mapping/bam_files/{cond}_RG.bam",
+        collate = touch("mapping/bam_files/{cond}_collate"),
+        sort = "mapping/bam_files/{cond}_sorted.bam",
+        fixmate = "mapping/bam_files/{cond}_fixmate.bam",
+        no_dup = "mapping/bam_files/{cond}_final.bam"
+    conda:
+        base_path + "/conda/mapping_2.yaml"
+    #container:
+        #"docker://vibsinglecellnf/bwamaptools:bwa-mem2-2.2.1-zlibng-2.0.6"
+    shell:
+        """
+        bwa mem -t4 {input.index} {input.F} {input.R} | samtools view -S -b > {output.bam}
+        bamaddrg -b {output.bam} -s {wildcards.cond} -r {wildcards.cond} > {output.bam_RG}
+        samtools collate {output.bam_RG} {output.collate}
+        samtools fixmate -r -m {output.collate}.bam {output.fixmate}
+        samtools sort {output.fixmate} -o {output.sort}
+        samtools markdup {output.sort} {output.no_dup}
+        samtools index {output.no_dup}
+        """
+
+rule stats:
+    input:
+        bam = "mapping/bam_files/{cond}_final.bam"
+    output:
+        stats = "stats/final/samtools/{cond}_stats.txt",
+    conda:
+        base_path + "/conda/mapping_2.yaml"
+    shell:
+        """
+        samtools stats {input} > {output.stats}
+        """
+
+rule multiqc:
+    input:
+        bams = expand("stats/final/samtools/{cond}_stats.txt", cond = conditions)
+    output:
+        outdir = directory("stats/final/multiqc")
+    #params:
+    #    "mapping/bam_files/*_final.bam"
+    container:
+        "docker://staphb/multiqc:latest"
+    shell:
+        """
+        multiqc {input.bams} -o {output.outdir}
+        """
+
+
+
+#rule gridss:
+#    input:
+#        index = base_path + "/ref_seq/hg19_chr8.fa.gz",
+#        bams = expand("mapping/bam_files/{cond}_final.bam", cond = conditions)
+#    output:
+#        "calling/SV.vcf.gz"
+#    container:
+#        "docker://gridss/gridss:latest"
+#    shell:
+#        """
+#        gridss -r {input.index} -o {output} --threads 6 {input.bams}
+#        """
