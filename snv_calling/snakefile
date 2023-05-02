@@ -1,0 +1,233 @@
+conditions = glob_wildcards("../sequences/{condition}_R1.fq.gz").condition
+
+base_path = (os.path.abspath(".."))
+
+from snakemake.remote.FTP import RemoteProvider as FTPRemoteProvider
+
+FTP = FTPRemoteProvider(username="gsapubftp-anonymous")
+
+train_files = FTP.glob_wildcards("ftp.broadinstitute.org/bundle/hg19/{files}.vcf.gz").files
+
+print(train_files)
+    
+rule all:
+    input:
+        expand("calling/{cond}.g.vcf.gz", cond = conditions),
+        base_path + "/ref_seq/hg19_chr8.dict",
+        "calling/cohort.g.vcf.gz",
+        "calling/genotype.vcf.gz",
+        directory("train_set"),
+        expand("train_set/{file}.vcf.gz.tbi", file = train_files),
+        "calling/cohort_indels.recal",
+        "calling/cohort_snps.recal",
+        "calling/cohort_indels.tranche",
+        "calling/cohort_snps.tranche",
+        "calling/indel.recalibrated.vcf.gz",
+        "calling/final.recalibrated.vcf.gz"
+
+rule createdict:
+    input:
+        base_path + "/ref_seq/hg19_chr8.fa"
+    output:
+        base_path + "/ref_seq/hg19_chr8.dict"
+    conda:
+        base_path + "/conda/gatk4.yaml"
+    shell:
+        """
+        gatk CreateSequenceDictionary -R {input}
+        """
+
+rule hcaller:
+    input:
+        ref = base_path + "/ref_seq/hg19_chr8.fa",
+        bam = base_path + "/mapping/bam_files/{cond}_final.bam",
+        dic = base_path + "/ref_seq/hg19_chr8.dict"
+    output:
+        "calling/{cond}.g.vcf.gz"
+    params:
+    conda:
+        base_path + "/conda/gatk4.yaml"
+    shell:
+        """
+        gatk --java-options "-Xmx7g" HaplotypeCaller  \
+        -R {input.ref} \
+        -I {input.bam} \
+        -O {output} \
+        -ERC GVCF \
+        --sequence-dictionary {input.dic}
+        """
+
+rule joinvcfs:
+    input:
+        ref = base_path + "/ref_seq/hg19_chr8.fa",
+        vcfs = expand("calling/{cond}.g.vcf.gz", cond = conditions)
+    output:
+        "calling/cohort.g.vcf.gz"
+    conda:
+        base_path + "/conda/gatk4.yaml"
+    shell:
+        """
+        vcfs=$(echo {input.vcfs} | sed 's/ / --variant /g')
+        gatk --java-options "-Xmx7g" CombineGVCFs \
+        -R {input.ref} \
+        --variant $vcfs \
+        -O {output}
+        """
+
+rule genotype:
+    input:
+        ref = base_path + "/ref_seq/hg19_chr8.fa",
+        vcf = "calling/cohort.g.vcf.gz"
+    output:
+        "calling/genotype.vcf.gz"
+    conda:
+        base_path + "/conda/gatk4.yaml"
+    shell:
+        """
+        gatk --java-options "-Xmx7g" GenotypeGVCFs \
+        -R {input.ref} \
+        -V {input.vcf} \
+        -O {output}
+        """
+
+#Hard filter for small datasets
+
+rule spns:
+gatk SelectVariants \
+    -V cohort.vcf.gz \
+    -select-type SNP \
+    -O snps.vcf.gz
+
+gatk SelectVariants \
+    -V cohort.vcf.gz \
+    -select-type INDEL \
+    -O indels.vcf.gz
+
+#For large datasets only
+
+rule train_set:
+    input:
+        FTP.remote(expand("ftp.broadinstitute.org/bundle/hg19/{file}.vcf.gz", file = train_files))
+    output:
+        vcf = expand("train_set/{file}.vcf.gz", file = train_files),
+        dir = directory("train_set")
+    shell:
+        """
+        mkdir -p {output.dir}
+        mv {input} {output.dir}
+        """
+
+rule index_train:
+    input:
+        "train_set/{file}.vcf.gz"
+    output:
+        touch("train_set/{file}.vcf.gz.tbi")
+    params:
+        "train_set/{file}.vcf"
+    conda:
+        base_path + "/conda/gatk4.yaml"
+    priority: 1
+    shell:
+        """
+        gunzip {input}
+        bgzip {params}
+        gatk IndexFeatureFile -I {input}
+        """
+
+rule rec_indels:
+    input:
+        vcf = "calling/genotype.vcf.gz",
+        a = "train_set/Mills_and_1000G_gold_standard.indels.hg19.sites.vcf.gz",
+        b = "train_set/1000G_phase1.indels.hg19.sites.vcf.gz",
+        c = "train_set/dbsnp_138.hg19.vcf.gz"
+    output:
+        recal = "calling/cohort_indels.recal",
+        tranche = "calling/cohort_indels.tranche"
+    conda:
+        base_path + "/conda/gatk4.yaml"   
+    shell:
+        """
+        gatk --java-options "-Xmx12g" VariantRecalibrator \
+        -V {input.vcf} \
+        --trust-all-polymorphic \
+        --max-gaussians 4 \
+        --resource:mills,known=false,training=true,truth=true,prior=12 {input.a} \
+        --resource:1000G,known=false,training=true,truth=false,prior=10 {input.b} \
+        --resource:dbsnp,known=true,training=false,truth=false,prior=2 {input.c} \
+        -an QD -an DP -an FS -an SOR -an ReadPosRankSum -an MQRankSum \
+        -mode INDEL \
+        -O {output.recal} \
+        --tranches-file {output.tranche}
+        """ #DP is not recommended for exome sequencing (view docummentation)
+
+rule rec_snps:
+    input:
+        vcf = "calling/genotype.vcf.gz",
+        a = "train_set/hapmap_3.3.hg19.sites.vcf.gz",
+        b = "train_set/1000G_omni2.5.hg19.sites.vcf.gz",
+        c = "train_set/1000G_phase1.snps.high_confidence.hg19.sites.vcf.gz",
+        d = "train_set/dbsnp_138.hg19.vcf.gz"
+    output:
+        recal = "calling/cohort_snps.recal",
+        tranche = "calling/cohort_snps.tranche"
+    conda:
+        base_path + "/conda/gatk4.yaml" 
+    shell:
+        """
+        gatk --java-options "-Xmx12g" VariantRecalibrator \
+        -V {input.vcf} \
+        --trust-all-polymorphic \
+        --max-gaussians 6 \
+        --resource:hapmap,known=false,training=true,truth=true,prior=15.0 {input.a} \
+        --resource:omni,known=false,training=true,truth=false,prior=12.0 {input.b} \
+        --resource:1000G,known=false,training=true,truth=false,prior=10.0 {input.c} \
+        --resource:dbsnp,known=true,training=false,truth=false,prior=2.0 {input.d} \
+        -an QD -an MQ -an MQRankSum -an ReadPosRankSum -an FS -an SOR -an DP \
+        -mode SNP \
+        -O {output.recal} \
+        --tranches-file {output.tranche}
+        """ #DP mode is not recommended for exome sequencing
+
+rule app_indels:
+    input:
+        vcf = "calling/genotype.vcf.gz",
+        recal = "calling/cohort_indels.recal",
+        tranche = "calling/cohort_indels.tranche"
+    output:
+        "calling/indel.recalibrated.vcf.gz"
+    conda:
+        base_path + "/conda/gatk4.yaml"
+    shell:
+        """
+        gatk --java-options "-Xmx10g" \
+        ApplyVQSR \
+        -V {input.vcf} \
+        --recal-file {input.recal} \
+        --tranches-file {input.tranche} \
+        --truth-sensitivity-filter-level 99.7 \
+        --create-output-variant-index true \
+        -mode INDEL \
+        -O {output}
+        """#--truth-sensitivity-filter-level 99.7 \ See recomended values
+
+rule app_snps:
+    input:
+        vcf = "calling/indel.recalibrated.vcf.gz",
+        recal = "calling/cohort_snps.recal",
+        tranche = "calling/cohort_snps.tranche"
+    output:
+        "calling/final.recalibrated.vcf.gz"
+    conda:
+        base_path + "/conda/gatk4.yaml"
+    shell:
+        """
+        gatk --java-options "-Xmx10g" \
+        ApplyVQSR \
+        -V {input.vcf} \
+        --recal-file {input.recal} \
+        --tranches-file {input.tranche} \
+        --truth-sensitivity-filter-level 99.7 \
+        --create-output-variant-index true \
+        -mode SNP \
+        -O {output}
+        """

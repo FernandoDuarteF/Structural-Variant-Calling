@@ -1,0 +1,75 @@
+conditions = glob_wildcards("../sequences/{condition}_R1.fq.gz").condition
+
+base_path = (os.path.abspath(".."))
+
+#Need sorted bam file (sorted by coord). Be careful with other bam files processing, might
+#not be compatible
+
+
+rule all:
+    input:
+        #"calling/SV.vcf.gz"
+        "manta_workflow/runWorkflow.py",
+        "manta_workflow/results/variants/diploidSV.vcf.gz",
+        "manta_workflow/results/variants/diploidSV.bedpe"
+
+#rule gridss:
+#    input:
+#        index = base_path + "/ref_seq/hg19_chr8.fa",
+#        bams = expand(base_path + "/mapping/bam_files/{cond}_coord_sort.bam", cond = conditions)
+#    output:
+#        "calling/SV.vcf.gz"
+#    container:
+#        "docker://gridss/gridss:latest"
+#    shell:
+#        """
+#        gridss -r {input.index} -o {output} --threads 6 {input.bams} --jvmheap 14g
+#        """
+
+
+rule manta_mk_workflow:
+    input:
+        index = base_path + "/ref_seq/hg19_chr8.fa",
+        bams = expand(base_path + "/mapping/bam_files/{cond}_final.bam", cond = conditions)
+    output:
+        "manta_workflow/runWorkflow.py"
+    params:
+        outdir = "manta_workflow"
+    #container:
+    #    "docker://zlskidmore/manta:latest"
+    conda:
+        base_path + "/conda/manta.yaml"
+    shell:
+        """
+        bams=$(echo {input.bams} | sed 's/ / --bam /g')
+        configManta.py --bam $bams --referenceFasta {input.index} --runDir {params.outdir} --exome
+        """
+
+rule run_manta:
+    input:
+        "manta_workflow/runWorkflow.py"
+    output:
+        "manta_workflow/results/variants/diploidSV.vcf.gz"
+    conda:
+        base_path + "/conda/manta.yaml"   
+    shell:
+        """
+        {input}
+        """
+
+rule to_bedpe:
+    input:
+        "manta_workflow/results/variants/diploidSV.vcf.gz"
+    output:
+        "manta_workflow/results/variants/diploidSV.bedpe"
+    conda:
+        base_path + "/conda/manta.yaml"
+    #container:
+    #    "docker://halllab/svtools:v0.5.1"
+    shell:
+        """
+        svtools vcftobedpe -i {input} > {output}
+        """
+    
+#Remember to filter vcf file (bcftools/vcftools/svtools)
+#bcftools query -f '[%CHROM\t%POS\t%END\t%ID\t%SAMPLE\t%GT\n]' diploidSV.vcf.gz | grep -v "0/0" | column -t

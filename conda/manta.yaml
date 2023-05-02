@@ -1,0 +1,6 @@
+name: manta
+channels:
+    - bioconda
+dependencies:
+    - manta=1.6.0
+    - svtools=0.5.1

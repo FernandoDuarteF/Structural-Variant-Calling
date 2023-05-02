@@ -1,1 +1,2 @@
-Structural Variant Calling
+Structural Variant Calling.
+For germline variants.
